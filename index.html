@@ -1,0 +1,1376 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PRESTA FACIL - Gestor de Préstamos</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <!-- Carga de las librerías de Firebase -->
+    <script type="module">
+        import { initializeApp } from 'https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js';
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js';
+        import { getFirestore, doc, getDoc, setDoc, updateDoc, onSnapshot, collection, query, where, getDocs } from 'https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js';
+        import { setLogLevel } from 'https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js';
+
+        // Set Firebase Log Level to Debug for development visibility
+        setLogLevel('Debug');
+
+        // Configuración de Firebase - ¡TUS CLAVES REALES!
+        const firebaseConfig = {
+            apiKey: "AIzaSyCPf9l0GhjqokDvpSGV7aNFoqVT3JbZlMI",
+            authDomain: "prestafacil-negocio.firebaseapp.com",
+            projectId: "prestafacil-negocio",
+            storageBucket: "prestafacil-negocio.firebasestorage.app",
+            messagingSenderId: "734736279885",
+            appId: "1:734736279885:web:0c699fb326a9f235c42f04"
+        };
+
+        const initialAuthToken = null; // No usamos el token temporal en la versión de producción
+        const appId = firebaseConfig.projectId;
+
+        // Inicializar Firebase si la configuración es válida
+        let app, db, auth;
+        if (firebaseConfig.apiKey) {
+            app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+
+            // Exportar las variables globales para que React las pueda usar (aunque React usa import)
+            window.db = db;
+            window.auth = auth;
+            window.appId = appId;
+
+            // Autenticación inicial
+            onAuthStateChanged(auth, async (user) => {
+                if (!user) {
+                    // Intenta iniciar sesión anónimamente si no hay usuario autenticado
+                    await signInAnonymously(auth).catch(error => {
+                        console.error("Error during anonymous sign-in:", error);
+                    });
+                } else {
+                    console.log("Authenticated user ID:", user.uid);
+                }
+            });
+
+        } else {
+            console.error("Firebase no está configurado. La aplicación no podrá guardar datos.");
+        }
+
+    </script>
+</head>
+<body class="bg-gray-50 min-h-screen font-sans">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useReducer, useCallback, useMemo } = React;
+
+        // --- CONSTANTES ---
+        const VIEWS = {
+            LOGIN: 'login',
+            DASHBOARD: 'dashboard',
+            CLIENT_DETAIL: 'client_detail',
+            LOAN_DETAIL: 'loan_detail',
+            NEW_LOAN_FORM: 'new_loan_form',
+            SECURITY_SETTINGS: 'security_settings',
+        };
+
+        const LOAN_TYPES = {
+            DIARIO: 'DIARIO',
+            TERMINO_FIJO: 'A_TERMINO_FIJO',
+        };
+
+        // --- UTILIDADES ---
+        const formatCurrency = (amount) => {
+            if (amount === null || amount === undefined) return 'S/ 0.00';
+            const num = parseFloat(amount);
+            if (isNaN(num)) return 'S/ 0.00';
+            return `S/ ${num.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ",")}`;
+        };
+
+        const formatDate = (date) => {
+            if (!date) return '-';
+            const d = date instanceof Date ? date : new Date(date);
+            return d.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' });
+        };
+
+        const formatDateTime = (timestamp) => {
+            if (!timestamp) return '-';
+            const d = timestamp.seconds ? new Date(timestamp.seconds * 1000) : new Date(timestamp);
+            return d.toLocaleString('es-ES', { dateStyle: 'short', timeStyle: 'short' });
+        };
+
+        // Función para contar los días HÁBILES (Lunes a Sábado) entre dos fechas.
+        const countWorkingDays = (startDate, endDate) => {
+            let count = 0;
+            let current = new Date(startDate);
+            let end = new Date(endDate);
+            end.setHours(0, 0, 0, 0); // Normalizar la hora final
+
+            // Si la fecha actual es anterior o igual a la fecha de desembolso, no hay días de cobro.
+            if (current >= end) return 0;
+            current.setDate(current.getDate() + 1); // Empezar a cobrar al DÍA SIGUIENTE del desembolso
+
+            while (current <= end) {
+                const day = current.getDay();
+                // 0 = Domingo (Día de descanso), 1 = Lunes, ..., 6 = Sábado
+                if (day !== 0) {
+                    count++;
+                }
+                current.setDate(current.getDate() + 1);
+            }
+            return count;
+        };
+
+        // --- CONTEXTO DE LA APLICACIÓN (GESTIÓN DE ESTADO) ---
+
+        const initialState = {
+            currentView: VIEWS.LOGIN,
+            isAuthenticated: false,
+            userId: null,
+            db: null,
+            auth: null,
+            clients: [],
+            loans: [],
+            selectedClient: null,
+            selectedLoan: null,
+            loginPassword: '123456', // Contraseña por defecto (admin)
+            notification: null,
+            loading: true,
+        };
+
+        function appReducer(state, action) {
+            switch (action.type) {
+                case 'SET_INIT_DATA':
+                    return { ...state, db: action.payload.db, auth: action.payload.auth, userId: action.payload.userId, loading: false };
+                case 'LOGIN_SUCCESS':
+                    return { ...state, isAuthenticated: true, currentView: VIEWS.DASHBOARD };
+                case 'LOGOUT':
+                    return { ...state, isAuthenticated: false, currentView: VIEWS.LOGIN, clients: [], loans: [] };
+                case 'SET_VIEW':
+                    return { ...state, currentView: action.payload };
+                case 'SET_CLIENTS':
+                    return { ...state, clients: action.payload };
+                case 'SET_LOANS':
+                    return { ...state, loans: action.payload };
+                case 'SELECT_CLIENT':
+                    return { ...state, selectedClient: action.payload, currentView: VIEWS.CLIENT_DETAIL };
+                case 'SELECT_LOAN':
+                    return { ...state, selectedLoan: action.payload, currentView: VIEWS.LOAN_DETAIL };
+                case 'SET_LOGIN_PASSWORD':
+                    return { ...state, loginPassword: action.payload };
+                case 'SHOW_NOTIFICATION':
+                    return { ...state, notification: { message: action.payload.message, type: action.payload.type } };
+                case 'HIDE_NOTIFICATION':
+                    return { ...state, notification: null };
+                default:
+                    return state;
+            }
+        }
+
+        const AppContext = React.createContext();
+
+        // Hook para inicializar Firebase y manejar el estado global
+        function useAppState() {
+            const [state, dispatch] = useReducer(appReducer, initialState);
+            const { db, auth, isAuthenticated, userId, loginPassword } = state;
+
+            // 1. Inicialización y Autenticación (Se ejecuta una sola vez)
+            useEffect(() => {
+                if (!window.db) {
+                    console.error("Firebase no inicializado correctamente en el contexto global.");
+                    return;
+                }
+                
+                const firebaseDb = window.db;
+                const firebaseAuth = window.auth;
+
+                // Cargar la contraseña guardada en Firestore (si existe)
+                const loadAdminPassword = async (currentUserId) => {
+                    if (!firebaseDb || !currentUserId) return;
+                    try {
+                        const docRef = doc(firebaseDb, `artifacts/${window.appId}/users/${currentUserId}/config`, 'admin');
+                        const docSnap = await getDoc(docRef);
+                        if (docSnap.exists()) {
+                            const savedPassword = docSnap.data().password;
+                            if (savedPassword) {
+                                dispatch({ type: 'SET_LOGIN_PASSWORD', payload: savedPassword });
+                                console.log("Contraseña de administrador cargada desde Firestore.");
+                            }
+                        } else {
+                             // Si no existe, guardar la contraseña por defecto
+                             await setDoc(docRef, { password: '123456' });
+                             console.log("Contraseña por defecto guardada en Firestore.");
+                        }
+                    } catch (error) {
+                        console.error("Error al cargar/guardar la contraseña de administrador:", error);
+                    }
+                };
+                
+                // Listener de autenticación
+                const unsubscribeAuth = onAuthStateChanged(firebaseAuth, async (user) => {
+                    let currentUserId = user ? user.uid : crypto.randomUUID();
+                    
+                    if (user && !user.isAnonymous) {
+                         // Si es un usuario con token real, usar ese ID. 
+                         // En este entorno, siempre entra aquí con un token inicial
+                    } else if (!user) {
+                        // Si el usuario no existe (o ya cerró sesión)
+                        currentUserId = crypto.randomUUID(); 
+                    }
+
+                    dispatch({ type: 'SET_INIT_DATA', payload: { db: firebaseDb, auth: firebaseAuth, userId: currentUserId } });
+                    
+                    // Solo cargamos la contraseña si estamos en la vista de Login o si ya la cargamos
+                    await loadAdminPassword(currentUserId);
+                });
+
+                return () => {
+                    if (unsubscribeAuth) unsubscribeAuth();
+                };
+            }, []);
+
+            // 2. Escucha de datos de clientes y préstamos (Se ejecuta después de la autenticación)
+            useEffect(() => {
+                let unsubscribeClients = () => {};
+                let unsubscribeLoans = () => {};
+
+                if (isAuthenticated && db && userId) {
+                    const clientCollectionPath = `artifacts/${window.appId}/users/${userId}/clients`;
+                    const loanCollectionPath = `artifacts/${window.appId}/users/${userId}/loans`;
+
+                    // Listener para Clientes
+                    const qClients = collection(db, clientCollectionPath);
+                    unsubscribeClients = onSnapshot(qClients, (snapshot) => {
+                        const clientsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                        dispatch({ type: 'SET_CLIENTS', payload: clientsData });
+                    }, (error) => {
+                        console.error("Error fetching clients:", error);
+                    });
+
+                    // Listener para Préstamos
+                    const qLoans = collection(db, loanCollectionPath);
+                    unsubscribeLoans = onSnapshot(qLoans, (snapshot) => {
+                        const loansData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                        dispatch({ type: 'SET_LOANS', payload: loansData });
+                    }, (error) => {
+                        console.error("Error fetching loans:", error);
+                    });
+                }
+
+                // Limpiar listeners al desmontar o desautenticar
+                return () => {
+                    unsubscribeClients();
+                    unsubscribeLoans();
+                };
+            }, [isAuthenticated, db, userId]);
+
+            // Función para mostrar notificaciones
+            const showNotification = useCallback((message, type = 'success') => {
+                dispatch({ type: 'SHOW_NOTIFICATION', payload: { message, type } });
+                setTimeout(() => {
+                    dispatch({ type: 'HIDE_NOTIFICATION' });
+                }, 3000);
+            }, []);
+
+            // Procesa los datos del préstamo para calcular atrasos y balances
+            const getProcessedLoans = useCallback(() => {
+                const today = new Date();
+                today.setHours(0, 0, 0, 0);
+
+                return state.loans.map(loan => {
+                    const principal = parseFloat(loan.principal);
+                    const interestRate = parseFloat(loan.interestRate) / 100;
+                    const totalToPay = principal * (1 + interestRate);
+                    const totalPaid = loan.payments.reduce((sum, p) => sum + parseFloat(p.amount), 0);
+                    const balance = totalToPay - totalPaid;
+
+                    let daysInArrears = 0;
+                    let expectedPaid = 0;
+
+                    if (loan.status === 'Active') {
+                        if (loan.type === LOAN_TYPES.DIARIO) {
+                            const startDate = loan.disbursementDate.toDate ? loan.disbursementDate.toDate() : new Date(loan.disbursementDate);
+                            const dailyQuota = parseFloat(loan.dailyQuota);
+
+                            // 1. Calcular el monto esperado
+                            const workingDays = countWorkingDays(startDate, today);
+                            expectedPaid = workingDays * dailyQuota;
+
+                            // 2. Calcular días de atraso
+                            if (totalPaid < expectedPaid) {
+                                let paymentDeficit = expectedPaid - totalPaid;
+                                daysInArrears = Math.ceil(paymentDeficit / dailyQuota);
+                            } else {
+                                daysInArrears = 0;
+                            }
+                        } else if (loan.type === LOAN_TYPES.TERMINO_FIJO) {
+                            const maturityDate = loan.maturityDate.toDate ? loan.maturityDate.toDate() : new Date(loan.maturityDate);
+
+                            if (today > maturityDate && balance > 0) {
+                                // Para término fijo, el atraso es el número de días después de la fecha de vencimiento
+                                const diffTime = Math.abs(today - maturityDate);
+                                daysInArrears = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+                            }
+                        }
+                    }
+
+                    return {
+                        ...loan,
+                        principal: principal,
+                        totalToPay: totalToPay,
+                        totalPaid: totalPaid,
+                        balance: balance,
+                        daysInArrears: daysInArrears,
+                        expectedPaid: expectedPaid,
+                        status: balance <= 0 ? 'Completed' : loan.status,
+                        // Añadir el porcentaje de interés de cada pago para el cálculo de ganancias
+                        interestRatio: (totalToPay - principal) / totalToPay,
+                    };
+                });
+            }, [state.loans]);
+
+            // Mezcla clientes con sus préstamos procesados
+            const getClientsWithLoans = useMemo(() => {
+                const processedLoans = getProcessedLoans();
+                return state.clients.map(client => {
+                    const clientLoans = processedLoans.filter(loan => loan.clientId === client.id);
+                    // Calcular el total pagado histórico del cliente
+                    const totalPaidHistory = clientLoans.reduce((sum, loan) => sum + loan.totalPaid, 0);
+
+                    return {
+                        ...client,
+                        loans: clientLoans,
+                        totalPaidHistory: totalPaidHistory, // Agregado: Total pagado en todos los préstamos
+                    };
+                }).sort((a, b) => (a.loans.some(l => l.daysInArrears > 0) ? -1 : 1)); // Clientes con atraso primero
+            }, [state.clients, getProcessedLoans]);
+
+
+            // Obtener el dashboard de ganancias mensuales
+            const getMonthlyEarnings = useCallback(() => {
+                const monthlyEarnings = {};
+
+                getProcessedLoans().forEach(loan => {
+                    loan.payments.forEach(payment => {
+                        const paymentDate = payment.date.toDate ? payment.date.toDate() : new Date(payment.date);
+                        const yearMonth = `${paymentDate.getFullYear()}-${String(paymentDate.getMonth() + 1).padStart(2, '0')}`;
+                        
+                        // Ganancia = Monto Pagado * Proporción de Interés
+                        const earnedInterest = parseFloat(payment.amount) * loan.interestRatio;
+                        
+                        if (!monthlyEarnings[yearMonth]) {
+                            monthlyEarnings[yearMonth] = 0;
+                        }
+                        monthlyEarnings[yearMonth] += earnedInterest;
+                    });
+                });
+
+                // Convertir a array y ordenar
+                return Object.keys(monthlyEarnings)
+                    .sort((a, b) => b.localeCompare(a))
+                    .map(key => ({
+                        month: key,
+                        earnings: monthlyEarnings[key]
+                    }));
+            }, [getProcessedLoans]);
+
+
+            return {
+                ...state,
+                dispatch,
+                showNotification,
+                getProcessedLoans,
+                getClientsWithLoans,
+                getMonthlyEarnings,
+            };
+        }
+
+        // --- COMPONENTES DE UI BÁSICOS ---
+
+        // Componente genérico de entrada de formulario para evitar la pérdida de foco
+        const Input = ({ label, type = 'text', name, value, onChange, placeholder = '', required = false, min, max }) => (
+            <div className="mb-4">
+                <label className="block text-sm font-medium text-gray-700 mb-1">{label}</label>
+                <input
+                    type={type}
+                    name={name}
+                    value={value}
+                    onChange={onChange}
+                    placeholder={placeholder}
+                    required={required}
+                    min={min}
+                    max={max}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 transition duration-150"
+                />
+            </div>
+        );
+
+        // Componente de Notificación Flotante
+        const Notification = ({ message, type }) => {
+            const baseClasses = "fixed top-4 right-4 p-4 rounded-lg shadow-xl text-white z-50 transition-opacity duration-300";
+            const typeClasses = type === 'error' ? 'bg-red-500' : 'bg-green-500';
+
+            return (
+                <div className={`${baseClasses} ${typeClasses}`}>
+                    {message}
+                </div>
+            );
+        };
+
+        // --- PANTALLAS PRINCIPALES ---
+
+        // VISTA: LoginScreen
+        function LoginScreen() {
+            const { dispatch, showNotification, auth, userId, loginPassword } = useAppState();
+            const [username, setUsername] = useState('');
+            const [password, setPassword] = useState('');
+            const [error, setError] = useState('');
+
+            const handleLogin = async (e) => {
+                e.preventDefault();
+                setError('');
+
+                // 1. Verificación de credenciales locales/firestore
+                if (username !== 'admin' || password !== loginPassword) {
+                    setError('Credenciales incorrectas. Intente nuevamente.');
+                    return;
+                }
+
+                // 2. Si las credenciales son correctas, realiza el login en el contexto
+                dispatch({ type: 'LOGIN_SUCCESS' });
+                showNotification('¡Inicio de sesión exitoso! Bienvenido/a a PRESTA FACIL.', 'success');
+            };
+
+            return (
+                <div className="flex items-center justify-center min-h-screen bg-gray-100 p-4">
+                    <div className="w-full max-w-sm bg-white p-8 rounded-xl shadow-2xl">
+                        <div className="text-center mb-6">
+                            <i className="fas fa-dollar-sign text-4xl text-indigo-600 mb-2"></i>
+                            <h1 className="text-2xl font-extrabold text-gray-800">PRESTA FACIL</h1>
+                            <p className="text-sm text-gray-500">Inicio de Sesión del Administrador</p>
+                        </div>
+                        <form onSubmit={handleLogin}>
+                            <Input
+                                label="Usuario"
+                                type="text"
+                                value={username}
+                                onChange={(e) => setUsername(e.target.value)}
+                                placeholder="admin"
+                                required
+                            />
+                            <Input
+                                label="Contraseña"
+                                type="password"
+                                value={password}
+                                onChange={(e) => setPassword(e.target.value)}
+                                placeholder="Ingrese su contraseña"
+                                required
+                            />
+
+                            {error && (
+                                <div className="bg-red-100 text-red-700 p-3 rounded-lg mb-4 text-sm text-center">
+                                    {error}
+                                </div>
+                            )}
+
+                            <button
+                                type="submit"
+                                className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 rounded-lg transition duration-200 shadow-md transform hover:scale-[1.01] flex items-center justify-center"
+                            >
+                                <i className="fas fa-sign-in-alt mr-2"></i> Iniciar Sesión
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            );
+        }
+
+        // VISTA: SecuritySettings
+        function SecuritySettingsView() {
+            const { dispatch, showNotification, userId, db, loginPassword } = useAppState();
+            const [currentPass, setCurrentPass] = useState('');
+            const [newPass, setNewPass] = useState('');
+            const [confirmPass, setConfirmPass] = useState('');
+            const [error, setError] = useState('');
+            const [loading, setLoading] = useState(false);
+
+            const handleUpdatePassword = async (e) => {
+                e.preventDefault();
+                setError('');
+                setLoading(true);
+
+                if (currentPass !== loginPassword) {
+                    setError('Error: La contraseña actual es incorrecta.');
+                    setLoading(false);
+                    return;
+                }
+
+                if (newPass.length < 6) {
+                    setError('Error: La nueva contraseña debe tener al menos 6 caracteres.');
+                    setLoading(false);
+                    return;
+                }
+
+                if (newPass !== confirmPass) {
+                    setError('Error: La nueva contraseña y la confirmación no coinciden.');
+                    setLoading(false);
+                    return;
+                }
+
+                try {
+                    const docRef = doc(db, `artifacts/${window.appId}/users/${userId}/config`, 'admin');
+                    await setDoc(docRef, { password: newPass });
+
+                    dispatch({ type: 'SET_LOGIN_PASSWORD', payload: newPass });
+                    showNotification('Contraseña actualizada con éxito. Cerrando sesión...', 'success');
+
+                    // Forzar el cierre de sesión para que el usuario inicie sesión con la nueva clave
+                    setTimeout(() => {
+                        dispatch({ type: 'LOGOUT' });
+                    }, 1000);
+
+                } catch (err) {
+                    setError('Error al guardar la nueva contraseña en la base de datos.');
+                    console.error("Error al actualizar la contraseña:", err);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            return (
+                <div className="p-4 sm:p-8 max-w-lg mx-auto">
+                    <button
+                        onClick={() => dispatch({ type: 'SET_VIEW', payload: VIEWS.DASHBOARD })}
+                        className="text-indigo-600 hover:text-indigo-800 mb-6 text-sm flex items-center"
+                    >
+                        <i className="fas fa-arrow-left mr-2"></i> Volver al Dashboard
+                    </button>
+                    <h2 className="text-2xl font-bold text-gray-800 mb-6">Ajustes de Seguridad</h2>
+
+                    <div className="bg-white p-6 rounded-xl shadow-lg">
+                        <form onSubmit={handleUpdatePassword}>
+                            <Input
+                                label="Contraseña Actual"
+                                type="password"
+                                value={currentPass}
+                                onChange={(e) => setCurrentPass(e.target.value)}
+                                required
+                            />
+                            <Input
+                                label="Nueva Contraseña (min 6 caracteres)"
+                                type="password"
+                                value={newPass}
+                                onChange={(e) => setNewPass(e.target.value)}
+                                required
+                            />
+                            <Input
+                                label="Confirmar Nueva Contraseña"
+                                type="password"
+                                value={confirmPass}
+                                onChange={(e) => setConfirmPass(e.target.value)}
+                                required
+                            />
+
+                            {error && (
+                                <div className="bg-red-100 text-red-700 p-3 rounded-lg mb-4 text-sm text-center">
+                                    {error}
+                                </div>
+                            )}
+
+                            <button
+                                type="submit"
+                                disabled={loading}
+                                className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 rounded-lg transition duration-200 shadow-md disabled:opacity-50"
+                            >
+                                {loading ? 'Guardando...' : 'Guardar Nueva Contraseña'}
+                            </button>
+                        </form>
+                    </div>
+                    <div className="mt-4 text-center text-xs text-gray-500">
+                        Usuario de Administrador: admin
+                    </div>
+                </div>
+            );
+        }
+
+        // VISTA: Dashboard (Resumen General)
+        function DashboardView() {
+            const { dispatch, getClientsWithLoans, getMonthlyEarnings, isAuthenticated, userId, auth } = useAppState();
+
+            const clientsWithLoans = getClientsWithLoans();
+            const allLoans = clientsWithLoans.flatMap(c => c.loans);
+            const monthlyEarnings = getMonthlyEarnings();
+
+            // Métricas
+            const totalPendingCapital = allLoans.reduce((sum, loan) => sum + loan.balance, 0);
+            const loansInArrears = allLoans.filter(loan => loan.daysInArrears > 0);
+            const loansInArrearsCount = loansInArrears.length;
+
+            const topArrears = loansInArrears
+                .sort((a, b) => b.daysInArrears - a.daysInArrears)
+                .slice(0, 3);
+
+            const handleLogout = () => {
+                if (auth) auth.signOut();
+                dispatch({ type: 'LOGOUT' });
+            };
+
+            const formatMonth = (key) => {
+                const [year, month] = key.split('-');
+                const date = new Date(year, month - 1, 1);
+                return date.toLocaleDateString('es-ES', { month: 'long', year: 'numeric' });
+            };
+
+            return (
+                <div className="p-4 sm:p-8">
+                    <header className="flex justify-between items-center mb-6">
+                        <h1 className="text-3xl font-extrabold text-gray-900">Dashboard General</h1>
+                        <div className="flex items-center space-x-2">
+                             <button
+                                onClick={() => dispatch({ type: 'SET_VIEW', payload: VIEWS.SECURITY_SETTINGS })}
+                                className="text-sm text-indigo-600 hover:text-indigo-800"
+                            >
+                                <i className="fas fa-lock mr-1"></i> Cambiar Contraseña
+                            </button>
+                            <button
+                                onClick={handleLogout}
+                                className="text-sm text-gray-600 hover:text-gray-800"
+                            >
+                                <i className="fas fa-sign-out-alt mr-1"></i> Salir
+                            </button>
+                        </div>
+                    </header>
+
+                    {/* Fila de Tarjetas de Métricas */}
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+                        <div className="bg-white p-5 rounded-xl shadow-lg border-l-4 border-indigo-500">
+                            <p className="text-sm font-medium text-gray-500">Capital Pendiente Total</p>
+                            <h2 className="text-2xl font-bold text-gray-900 mt-1">{formatCurrency(totalPendingCapital)}</h2>
+                        </div>
+                        <div className="bg-white p-5 rounded-xl shadow-lg border-l-4 border-red-500">
+                            <p className="text-sm font-medium text-gray-500">Préstamos en Atraso</p>
+                            <h2 className="text-2xl font-bold text-red-600 mt-1">{loansInArrearsCount}</h2>
+                        </div>
+                        <div className="bg-white p-5 rounded-xl shadow-lg border-l-4 border-green-500">
+                            <p className="text-sm font-medium text-gray-500">Clientes Activos</p>
+                            <h2 className="text-2xl font-bold text-gray-900 mt-1">{clientsWithLoans.length}</h2>
+                        </div>
+                    </div>
+
+                    {/* Botones de Acción */}
+                    <div className="flex flex-col sm:flex-row justify-between mb-8 space-y-3 sm:space-y-0 sm:space-x-4">
+                        <button
+                            onClick={() => dispatch({ type: 'SET_VIEW', payload: VIEWS.NEW_LOAN_FORM })}
+                            className="w-full sm:w-auto bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 px-6 rounded-lg shadow-md transition duration-200 flex items-center justify-center"
+                        >
+                            <i className="fas fa-plus mr-2"></i> Registrar Nuevo Cliente/Préstamo
+                        </button>
+                        <button
+                            onClick={() => dispatch({ type: 'SET_VIEW', payload: VIEWS.CLIENT_DETAIL })}
+                            className="w-full sm:w-auto bg-white border border-gray-300 hover:bg-gray-100 text-gray-800 font-semibold py-3 px-6 rounded-lg shadow-md transition duration-200 flex items-center justify-center"
+                        >
+                            <i className="fas fa-users mr-2"></i> Ver Todos los Clientes
+                        </button>
+                    </div>
+
+                    {/* Ganancias Mensuales */}
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        <div className="bg-white p-6 rounded-xl shadow-lg">
+                            <h3 className="text-xl font-bold text-gray-800 mb-4 flex items-center">
+                                <i className="fas fa-chart-line text-green-600 mr-2"></i> Ganancia Neta por Mes (Intereses)
+                            </h3>
+                            <div className="space-y-3">
+                                {monthlyEarnings.length > 0 ? (
+                                    monthlyEarnings.map(item => (
+                                        <div key={item.month} className="flex justify-between items-center border-b pb-2">
+                                            <span className="font-medium">{formatMonth(item.month)}</span>
+                                            <span className="text-green-600 font-semibold">{formatCurrency(item.earnings)}</span>
+                                        </div>
+                                    ))
+                                ) : (
+                                    <p className="text-gray-500">Aún no hay pagos registrados para calcular las ganancias.</p>
+                                )}
+                            </div>
+                        </div>
+
+                        {/* Top Atrasos */}
+                        <div className="bg-white p-6 rounded-xl shadow-lg">
+                            <h3 className="text-xl font-bold text-gray-800 mb-4 flex items-center">
+                                <i className="fas fa-exclamation-triangle text-red-600 mr-2"></i> Top 3 Préstamos en Mayor Atraso
+                            </h3>
+                            <div className="space-y-3">
+                                {topArrears.length > 0 ? (
+                                    topArrears.map(loan => {
+                                        const client = clientsWithLoans.find(c => c.id === loan.clientId);
+                                        return (
+                                            <div key={loan.id} className="flex justify-between items-center p-3 bg-red-50 rounded-lg">
+                                                <div>
+                                                    <p className="font-semibold text-red-700">{client?.name || 'Cliente Desconocido'}</p>
+                                                    <p className="text-xs text-gray-600">ID Préstamo: {loan.id.substring(0, 8)}</p>
+                                                </div>
+                                                <div className="text-right">
+                                                    <p className="font-bold text-lg text-red-600">{loan.daysInArrears}</p>
+                                                    <p className="text-xs text-gray-500">días de atraso</p>
+                                                </div>
+                                            </div>
+                                        );
+                                    })
+                                ) : (
+                                    <p className="text-gray-500">¡Todos los préstamos están al día! 🎉</p>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="mt-8 text-center text-xs text-gray-500">
+                        <p>ID de Sesión: {userId}</p>
+                    </div>
+                </div>
+            );
+        }
+
+        // VISTA: ClientsListView
+        function ClientsListView() {
+            const { dispatch, getClientsWithLoans } = useAppState();
+            const clients = getClientsWithLoans();
+
+            return (
+                <div className="p-4 sm:p-8 max-w-4xl mx-auto">
+                    <button
+                        onClick={() => dispatch({ type: 'SET_VIEW', payload: VIEWS.DASHBOARD })}
+                        className="text-indigo-600 hover:text-indigo-800 mb-6 text-sm flex items-center"
+                    >
+                        <i className="fas fa-arrow-left mr-2"></i> Volver al Dashboard
+                    </button>
+                    <h2 className="text-2xl font-bold text-gray-800 mb-6">Lista de Clientes ({clients.length})</h2>
+
+                    <div className="space-y-4">
+                        {clients.length > 0 ? (
+                            clients.map(client => (
+                                <div
+                                    key={client.id}
+                                    className={`bg-white p-5 rounded-xl shadow-lg cursor-pointer hover:shadow-xl transition duration-200 border-l-4 ${
+                                        client.loans.some(l => l.daysInArrears > 0) ? 'border-red-500' : 'border-green-500'
+                                    }`}
+                                    onClick={() => dispatch({ type: 'SELECT_CLIENT', payload: client })}
+                                >
+                                    <div className="flex justify-between items-center">
+                                        <div>
+                                            <p className="text-xl font-semibold text-gray-800">{client.name}</p>
+                                            <p className="text-sm text-gray-500">{client.phone}</p>
+                                        </div>
+                                        <div className="text-right">
+                                            {client.loans.length > 0 && (
+                                                <p className="text-sm font-medium text-gray-600">
+                                                    Préstamos Activos: <span className="font-bold">{client.loans.filter(l => l.status === 'Active').length}</span>
+                                                </p>
+                                            )}
+                                            {client.loans.some(l => l.daysInArrears > 0) && (
+                                                <span className="text-xs font-bold text-red-600 bg-red-100 px-2 py-1 rounded-full">
+                                                    ¡ATRASO!
+                                                </span>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                            ))
+                        ) : (
+                            <p className="text-center text-gray-500 p-8 bg-white rounded-xl shadow-lg">No hay clientes registrados aún. ¡Empieza a registrar préstamos!</p>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
+        // VISTA: ClientDetailView
+        function ClientDetailView() {
+            const { dispatch, selectedClient } = useAppState();
+            if (!selectedClient) return null;
+
+            const loansInArrears = selectedClient.loans.filter(l => l.daysInArrears > 0);
+            const activeLoans = selectedClient.loans.filter(l => l.status === 'Active');
+
+            return (
+                <div className="p-4 sm:p-8 max-w-4xl mx-auto">
+                    <button
+                        onClick={() => dispatch({ type: 'SET_VIEW', payload: VIEWS.DASHBOARD })}
+                        className="text-indigo-600 hover:text-indigo-800 mb-6 text-sm flex items-center"
+                    >
+                        <i className="fas fa-arrow-left mr-2"></i> Volver al Dashboard
+                    </button>
+
+                    <div className="bg-white p-6 rounded-xl shadow-2xl mb-6">
+                        <h2 className="text-3xl font-extrabold text-gray-900 mb-2">{selectedClient.name}</h2>
+                        <p className="text-lg text-gray-600 mb-4">Teléfono: {selectedClient.phone}</p>
+                        <div className="flex space-x-4 border-t pt-4">
+                             <p className="text-sm font-medium text-gray-500">
+                                Total Pagado Histórico: <span className="font-bold text-green-600 text-lg">{formatCurrency(selectedClient.totalPaidHistory)}</span>
+                            </p>
+                            <p className="text-sm font-medium text-gray-500">
+                                Préstamos Activos: <span className="font-bold text-gray-800 text-lg">{activeLoans.length}</span>
+                            </p>
+                        </div>
+                    </div>
+
+                    <h3 className="text-xl font-bold text-gray-800 mb-4">Préstamos Activos ({activeLoans.length})</h3>
+
+                    {activeLoans.length > 0 ? (
+                        <div className="space-y-4">
+                            {activeLoans.map(loan => (
+                                <div
+                                    key={loan.id}
+                                    className={`bg-white p-5 rounded-xl shadow-md border-l-4 cursor-pointer hover:shadow-lg transition duration-200 ${
+                                        loan.daysInArrears > 0 ? 'border-red-500' : 'border-green-500'
+                                    }`}
+                                    onClick={() => dispatch({ type: 'SELECT_LOAN', payload: loan })}
+                                >
+                                    <div className="flex justify-between items-start">
+                                        <div>
+                                            <p className="text-lg font-semibold text-gray-800">
+                                                {loan.type === LOAN_TYPES.DIARIO ? 'Préstamo Diario' : 'Préstamo a Término Fijo'}
+                                            </p>
+                                            <p className="text-sm text-gray-500">Interés: {loan.interestRate}%</p>
+                                        </div>
+                                        <div className="text-right">
+                                            <p className="text-sm font-medium text-gray-600">Saldo Pendiente</p>
+                                            <p className="text-xl font-bold text-indigo-600">{formatCurrency(loan.balance)}</p>
+                                        </div>
+                                    </div>
+                                    <div className="mt-3 pt-3 border-t border-gray-100 flex justify-between items-center">
+                                        {loan.daysInArrears > 0 ? (
+                                            <span className="text-sm font-bold text-red-600">
+                                                ¡ATRASO! {loan.daysInArrears} {loan.type === LOAN_TYPES.DIARIO ? 'días esperados sin pagar' : 'días vencido'}
+                                            </span>
+                                        ) : (
+                                            <span className="text-sm font-bold text-green-600">Al día / {loan.type === LOAN_TYPES.DIARIO ? `Cuota Diaria: ${formatCurrency(loan.dailyQuota)}` : `Vence: ${formatDate(loan.maturityDate)}`}</span>
+                                        )}
+                                        <i className="fas fa-chevron-right text-gray-400"></i>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    ) : (
+                         <div className="p-4 text-center text-gray-500 bg-white rounded-xl shadow-lg">
+                            Este cliente no tiene préstamos activos.
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // VISTA: LoanDetailView
+        function LoanDetailView() {
+            const { dispatch, selectedLoan, selectedClient, db, userId, showNotification } = useAppState();
+            const [paymentAmount, setPaymentAmount] = useState('');
+            const [loading, setLoading] = useState(false);
+
+            if (!selectedLoan || !selectedClient) return null;
+
+            const loan = selectedLoan;
+
+            const handleRegisterPayment = async (e) => {
+                e.preventDefault();
+                setLoading(true);
+
+                const amount = parseFloat(paymentAmount);
+                if (isNaN(amount) || amount <= 0) {
+                    showNotification('El monto debe ser un número positivo.', 'error');
+                    setLoading(false);
+                    return;
+                }
+
+                if (amount > loan.balance) {
+                    showNotification(`El monto excede el saldo pendiente (${formatCurrency(loan.balance)}).`, 'error');
+                    setLoading(false);
+                    return;
+                }
+
+                try {
+                    const loanDocRef = doc(db, `artifacts/${window.appId}/users/${userId}/loans`, loan.id);
+                    const newPayments = [...loan.payments, { amount: amount, date: new Date() }];
+
+                    await updateDoc(loanDocRef, {
+                        payments: newPayments,
+                        status: loan.balance - amount <= 0 ? 'Completed' : 'Active',
+                    });
+
+                    showNotification(`Pago de ${formatCurrency(amount)} registrado con éxito.`, 'success');
+                    setPaymentAmount(''); // Limpiar el campo
+                    // El estado se actualizará automáticamente vía onSnapshot
+
+                } catch (error) {
+                    showNotification('Error al registrar el pago en la base de datos.', 'error');
+                    console.error("Error al registrar pago:", error);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const isCompleted = loan.status === 'Completed';
+
+            return (
+                <div className="p-4 sm:p-8 max-w-4xl mx-auto">
+                    <button
+                        onClick={() => dispatch({ type: 'SELECT_CLIENT', payload: selectedClient })}
+                        className="text-indigo-600 hover:text-indigo-800 mb-6 text-sm flex items-center"
+                    >
+                        <i className="fas fa-arrow-left mr-2"></i> Volver a {selectedClient.name}
+                    </button>
+
+                    <h2 className="text-2xl font-bold text-gray-800 mb-4">Detalles del Préstamo</h2>
+
+                    {/* Resumen del Préstamo */}
+                    <div className="bg-white p-6 rounded-xl shadow-2xl mb-6">
+                        <h3 className="text-xl font-bold text-gray-900 mb-4">Resumen y Estado</h3>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                            <StatCard title="Capital" value={formatCurrency(loan.principal)} />
+                            <StatCard title="Interés" value={`${loan.interestRate}%`} />
+                            <StatCard title="Total a Pagar" value={formatCurrency(loan.totalToPay)} />
+                            <StatCard title="Desembolso" value={formatDate(loan.disbursementDate)} />
+
+                            {loan.type === LOAN_TYPES.DIARIO && (
+                                <StatCard title="Cuota Diaria" value={formatCurrency(loan.dailyQuota)} />
+                            )}
+                            {loan.type === LOAN_TYPES.TERMINO_FIJO && (
+                                <StatCard title="Vencimiento" value={formatDate(loan.maturityDate)} />
+                            )}
+                        </div>
+                        <div className="mt-4 pt-4 border-t border-gray-100 grid grid-cols-2 gap-4">
+                            <StatCard title="TOTAL PAGADO" value={formatCurrency(loan.totalPaid)} color="text-green-600" size="text-2xl" />
+                            <StatCard title="SALDO PENDIENTE" value={formatCurrency(loan.balance)} color="text-red-600" size="text-2xl" />
+                        </div>
+
+                         {/* Atraso */}
+                        <div className={`mt-4 p-3 rounded-lg text-center font-bold ${
+                            loan.daysInArrears > 0 && !isCompleted ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'
+                        }`}>
+                            {loan.daysInArrears > 0 && !isCompleted
+                                ? `¡ATRASO CRÍTICO! ${loan.daysInArrears} días sin cumplir la expectativa de pago.`
+                                : isCompleted ? 'PRÉSTAMO COMPLETADO' : 'PRÉSTAMO AL DÍA'
+                            }
+                        </div>
+                    </div>
+
+                    {/* Registro de Pago */}
+                    {!isCompleted && (
+                        <div className="bg-white p-6 rounded-xl shadow-lg mb-6 border-l-4 border-indigo-400">
+                            <h3 className="text-xl font-bold text-gray-800 mb-4">Registrar Nuevo Pago</h3>
+                            <form onSubmit={handleRegisterPayment}>
+                                <Input
+                                    label={`Monto a Pagar (Máximo: ${formatCurrency(loan.balance)})`}
+                                    type="number"
+                                    name="paymentAmount"
+                                    value={paymentAmount}
+                                    onChange={(e) => setPaymentAmount(e.target.value)}
+                                    placeholder="Ej: 50.00"
+                                    required
+                                    min="0.01"
+                                    max={loan.balance.toFixed(2)}
+                                />
+                                <button
+                                    type="submit"
+                                    disabled={loading}
+                                    className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 rounded-lg shadow-md transition duration-200 disabled:opacity-50"
+                                >
+                                    {loading ? 'Procesando...' : 'Confirmar Pago'}
+                                </button>
+                            </form>
+                        </div>
+                    )}
+
+                    {/* Historial de Pagos */}
+                    <div className="bg-white p-6 rounded-xl shadow-lg">
+                        <h3 className="text-xl font-bold text-gray-800 mb-4">Historial de Pagos ({loan.payments.length})</h3>
+                        <div className="max-h-60 overflow-y-auto">
+                            {loan.payments && loan.payments.length > 0 ? (
+                                loan.payments.slice().reverse().map((p, index) => ( // Pagos más recientes primero
+                                    <div key={index} className="flex justify-between items-center p-3 border-b last:border-b-0">
+                                        <span className="font-medium text-green-600">{formatCurrency(p.amount)}</span>
+                                        <span className="text-xs text-gray-500">
+                                            {formatDateTime(p.date)}
+                                        </span>
+                                    </div>
+                                ))
+                            ) : (
+                                <p className="text-gray-500 text-center">No hay pagos registrados para este préstamo.</p>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        const StatCard = ({ title, value, color = 'text-gray-900', size = 'text-lg' }) => (
+            <div className="p-1">
+                <p className="text-xs font-medium text-gray-500">{title}</p>
+                <p className={`${size} font-bold ${color}`}>{value}</p>
+            </div>
+        );
+
+        // VISTA: NewLoanFormView
+        function NewLoanFormView() {
+            const { dispatch, db, userId, showNotification, clients, getClientsWithLoans } = useAppState();
+            const allClients = getClientsWithLoans();
+            const [formData, setFormData] = useState({
+                // Client Fields
+                clientId: '',
+                clientName: '',
+                clientPhone: '',
+                // Loan Fields
+                principal: '',
+                interestRate: '',
+                disbursementDate: formatDate(new Date()),
+                type: LOAN_TYPES.DIARIO,
+                dailyQuota: '',
+                maturityDate: '',
+            });
+            const [loading, setLoading] = useState(false);
+            const [selectedClientObj, setSelectedClientObj] = useState(null);
+
+            const handleClientChange = (e) => {
+                const clientId = e.target.value;
+                if (clientId === '-- NEW --') {
+                    setFormData(prev => ({ ...prev, clientId: '', clientName: '', clientPhone: '' }));
+                    setSelectedClientObj(null);
+                } else {
+                    const client = allClients.find(c => c.id === clientId);
+                    if (client) {
+                        setFormData(prev => ({ ...prev, clientId: client.id, clientName: client.name, clientPhone: client.phone }));
+                        setSelectedClientObj(client);
+                    }
+                }
+            };
+
+            const handleInputChange = (e) => {
+                const { name, value } = e.target;
+                setFormData(prev => ({ ...prev, [name]: value }));
+            };
+
+            const parseDate = (dateString) => {
+                const [day, month, year] = dateString.split('/').map(Number);
+                return new Date(year, month - 1, day);
+            };
+
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                setLoading(true);
+
+                // Validación de campos
+                const principal = parseFloat(formData.principal);
+                const interestRate = parseFloat(formData.interestRate);
+                if (isNaN(principal) || principal <= 0 || isNaN(interestRate) || interestRate <= 0) {
+                    showNotification('El capital y la tasa de interés deben ser números positivos.', 'error');
+                    setLoading(false);
+                    return;
+                }
+
+                if (formData.type === LOAN_TYPES.DIARIO && (!formData.dailyQuota || parseFloat(formData.dailyQuota) <= 0)) {
+                    showNotification('Para préstamos diarios, la cuota diaria es obligatoria.', 'error');
+                    setLoading(false);
+                    return;
+                }
+
+                try {
+                    // --- 1. Crear o encontrar el cliente ---
+                    let clientDocId = formData.clientId;
+                    if (!clientDocId) {
+                        if (!formData.clientName) {
+                            showNotification('El nombre del cliente es obligatorio.', 'error');
+                            setLoading(false);
+                            return;
+                        }
+                        // Creamos el documento del cliente
+                        const clientData = {
+                            name: formData.clientName,
+                            phone: formData.clientPhone,
+                            createdAt: new Date(),
+                        };
+                        const clientsColRef = collection(db, `artifacts/${window.appId}/users/${userId}/clients`);
+                        const newClientDocRef = await setDoc(doc(clientsColRef), clientData);
+                        clientDocId = newClientDocRef.id;
+                    }
+
+                    // --- 2. Crear el préstamo ---
+                    const loanData = {
+                        clientId: clientDocId,
+                        principal: principal,
+                        interestRate: interestRate,
+                        disbursementDate: new Date(formData.disbursementDate),
+                        type: formData.type,
+                        status: 'Active',
+                        payments: [],
+                        createdAt: new Date(),
+                        // Campos condicionales
+                        dailyQuota: formData.type === LOAN_TYPES.DIARIO ? parseFloat(formData.dailyQuota) : null,
+                        maturityDate: formData.type === LOAN_TYPES.TERMINO_FIJO ? new Date(formData.maturityDate) : null,
+                    };
+
+                    const loansColRef = collection(db, `artifacts/${window.appId}/users/${userId}/loans`);
+                    await setDoc(doc(loansColRef), loanData);
+
+                    showNotification('Préstamo registrado con éxito.', 'success');
+                    dispatch({ type: 'SET_VIEW', payload: VIEWS.DASHBOARD });
+
+                } catch (error) {
+                    showNotification('Error al crear el cliente o el préstamo.', 'error');
+                    console.error("Error al crear cliente/préstamo:", error);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+
+            // Formatear fechas para el input HTML (yyyy-mm-dd)
+            const today = new Date().toISOString().substring(0, 10);
+            const maturityDateExample = new Date();
+            maturityDateExample.setDate(maturityDateExample.getDate() + 30);
+            const defaultMaturity = maturityDateExample.toISOString().substring(0, 10);
+
+            return (
+                <div className="p-4 sm:p-8 max-w-lg mx-auto">
+                    <button
+                        onClick={() => dispatch({ type: 'SET_VIEW', payload: VIEWS.DASHBOARD })}
+                        className="text-indigo-600 hover:text-indigo-800 mb-6 text-sm flex items-center"
+                    >
+                        <i className="fas fa-arrow-left mr-2"></i> Volver al Dashboard
+                    </button>
+                    <h2 className="text-2xl font-bold text-gray-800 mb-6">Registro de Nuevo Préstamo</h2>
+
+                    <div className="bg-white p-6 rounded-xl shadow-lg">
+                        <form onSubmit={handleSubmit}>
+                            {/* 1. Datos del Cliente */}
+                            <h3 className="text-lg font-bold text-gray-800 mb-3">1. Datos del Cliente</h3>
+                            <div className="mb-4">
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Cliente Existente</label>
+                                <select
+                                    onChange={handleClientChange}
+                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 transition duration-150"
+                                >
+                                    <option value="-- NEW --">-- Nuevo Cliente --</option>
+                                    {allClients.map(client => (
+                                        <option key={client.id} value={client.id}>{client.name} ({client.phone})</option>
+                                    ))}
+                                </select>
+                            </div>
+
+                            <Input
+                                label="Nombre del Cliente"
+                                type="text"
+                                name="clientName"
+                                value={formData.clientName}
+                                onChange={handleInputChange}
+                                placeholder="Nombre completo"
+                                required={!formData.clientId}
+                                disabled={!!formData.clientId}
+                            />
+                            <Input
+                                label="Teléfono del Cliente"
+                                type="tel"
+                                name="clientPhone"
+                                value={formData.clientPhone}
+                                onChange={handleInputChange}
+                                placeholder="9XXXXXXXX"
+                                disabled={!!formData.clientId}
+                            />
+
+                            {/* 2. Detalles del Préstamo */}
+                            <h3 className="text-lg font-bold text-gray-800 mt-6 mb-3 border-t pt-4">2. Detalles del Préstamo</h3>
+                            <Input
+                                label="Capital Desembolsado (S/)"
+                                type="number"
+                                name="principal"
+                                value={formData.principal}
+                                onChange={handleInputChange}
+                                placeholder="1000.00"
+                                required
+                                min="1"
+                            />
+                            <Input
+                                label="Tasa de Interés (%)"
+                                type="number"
+                                name="interestRate"
+                                value={formData.interestRate}
+                                onChange={handleInputChange}
+                                placeholder="10"
+                                required
+                                min="0.01"
+                            />
+                            <Input
+                                label="Fecha de Desembolso"
+                                type="date"
+                                name="disbursementDate"
+                                value={formData.disbursementDate}
+                                onChange={handleInputChange}
+                                required
+                                max={today}
+                            />
+
+                            <div className="mb-4">
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Tipo de Préstamo</label>
+                                <select
+                                    name="type"
+                                    value={formData.type}
+                                    onChange={handleInputChange}
+                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 transition duration-150"
+                                >
+                                    <option value={LOAN_TYPES.DIARIO}>Diario (Cuotas Diarias)</option>
+                                    <option value={LOAN_TYPES.TERMINO_FIJO}>A Término Fijo (Pago Único)</option>
+                                </select>
+                            </div>
+
+                            {formData.type === LOAN_TYPES.DIARIO && (
+                                <Input
+                                    label="Cuota Diaria Requerida (S/)"
+                                    type="number"
+                                    name="dailyQuota"
+                                    value={formData.dailyQuota}
+                                    onChange={handleInputChange}
+                                    placeholder="5.00"
+                                    required
+                                    min="0.01"
+                                />
+                            )}
+
+                            {formData.type === LOAN_TYPES.TERMINO_FIJO && (
+                                <Input
+                                    label="Fecha de Vencimiento"
+                                    type="date"
+                                    name="maturityDate"
+                                    value={formData.maturityDate || defaultMaturity}
+                                    onChange={handleInputChange}
+                                    required
+                                />
+                            )}
+
+
+                            <button
+                                type="submit"
+                                disabled={loading}
+                                className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 mt-6 rounded-lg shadow-md transition duration-200 disabled:opacity-50"
+                            >
+                                {loading ? 'Registrando...' : 'Registrar Préstamo'}
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            );
+        }
+
+        // --- COMPONENTE CONTENEDOR DE LA APLICACIÓN ---
+        function App() {
+            const appState = useAppState();
+            const { currentView, isAuthenticated, loading, notification, dispatch, selectedLoan, selectedClient } = appState;
+
+            let ViewComponent;
+            switch (currentView) {
+                case VIEWS.LOGIN:
+                    ViewComponent = LoginScreen;
+                    break;
+                case VIEWS.DASHBOARD:
+                    ViewComponent = DashboardView;
+                    break;
+                case VIEWS.CLIENT_DETAIL:
+                    ViewComponent = ClientDetailView;
+                    break;
+                case VIEWS.LOAN_DETAIL:
+                    ViewComponent = LoanDetailView;
+                    break;
+                case VIEWS.NEW_LOAN_FORM:
+                    ViewComponent = NewLoanFormView;
+                    break;
+                case VIEWS.SECURITY_SETTINGS:
+                    ViewComponent = SecuritySettingsView;
+                    break;
+                default:
+                    ViewComponent = DashboardView;
+            }
+
+            if (loading && !isAuthenticated) {
+                 return <div className="flex items-center justify-center min-h-screen text-gray-500">Cargando aplicación...</div>;
+            }
+
+
+            return (
+                <AppContext.Provider value={appState}>
+                    <div className="min-h-screen">
+                         {/* Header con el título */}
+                        <header className="bg-white shadow-md p-4 sticky top-0 z-10">
+                            <h1 className="text-xl font-extrabold text-indigo-600 flex items-center">
+                                <i className="fas fa-dollar-sign mr-2"></i> PRESTA FACIL - Gestor de Préstamos
+                            </h1>
+                        </header>
+                        
+                        {/* Contenido principal */}
+                        <main className="pb-10">
+                            {isAuthenticated ? <ViewComponent /> : <LoginScreen />}
+                        </main>
+                        
+                        {/* Navegación Móvil (Footer) */}
+                        {isAuthenticated && (
+                            <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 shadow-lg sm:hidden z-10">
+                                <div className="flex justify-around items-center h-16">
+                                    <NavButton
+                                        icon="home"
+                                        label="Dashboard"
+                                        view={VIEWS.DASHBOARD}
+                                        currentView={currentView}
+                                        dispatch={dispatch}
+                                    />
+                                     <NavButton
+                                        icon="users"
+                                        label="Clientes"
+                                        view={VIEWS.CLIENT_DETAIL}
+                                        currentView={currentView}
+                                        dispatch={dispatch}
+                                    />
+                                    <NavButton
+                                        icon="plus-circle"
+                                        label="Préstamo"
+                                        view={VIEWS.NEW_LOAN_FORM}
+                                        currentView={currentView}
+                                        dispatch={dispatch}
+                                    />
+                                </div>
+                            </nav>
+                        )}
+                         {notification && <Notification message={notification.message} type={notification.type} />}
+                    </div>
+                </AppContext.Provider>
+            );
+        }
+
+        const NavButton = ({ icon, label, view, currentView, dispatch }) => {
+            const isActive = currentView === view || (view === VIEWS.CLIENT_DETAIL && (currentView === VIEWS.CLIENT_DETAIL || currentView === VIEWS.LOAN_DETAIL));
+            
+            // Si estamos en detalle de cliente/préstamo, el botón de clientes permanece activo
+            const iconClass = isActive ? 'text-indigo-600' : 'text-gray-500 group-hover:text-indigo-600';
+
+            const handleClick = () => {
+                // Si el usuario está en el detalle del préstamo, al hacer clic en clientes lo lleva a la lista
+                if (view === VIEWS.CLIENT_DETAIL && (currentView === VIEWS.CLIENT_DETAIL || currentView === VIEWS.LOAN_DETAIL || currentView === VIEWS.NEW_LOAN_FORM)) {
+                    dispatch({ type: 'SET_VIEW', payload: VIEWS.CLIENT_DETAIL });
+                } else {
+                    dispatch({ type: 'SET_VIEW', payload: view });
+                }
+            }
+
+            return (
+                <button
+                    onClick={handleClick}
+                    className="flex flex-col items-center justify-center p-2 group"
+                >
+                    <i className={`fas fa-${icon} text-lg ${iconClass}`}></i>
+                    <span className={`text-xs mt-1 font-medium ${iconClass}`}>{label}</span>
+                </button>
+            );
+        };
+
+        ReactDOM.render(<App />, document.getElementById('root'));
+    </script>
+</body>
+</html>
+
