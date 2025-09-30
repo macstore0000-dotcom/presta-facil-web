@@ -40,7 +40,7 @@
         const CURRENCY_SYMBOL = 'S/.';
 
         // Función para inicializar Firebase (incluye autenticación)
-        const setupFirebase = async (setAuthReady, setUserId, setDb, setAuth) => {
+        const setupFirebase = async (onUserStatusChange, setIsLoading) => {
             try {
                 // Your web app's Firebase configuration
                 const firebaseConfig = {
@@ -56,34 +56,16 @@
                     firebase.initializeApp(firebaseConfig);
                 }
                 
-                const dbInstance = firebase.firestore();
-                const authInstance = firebase.auth();
-                
-                // Establecer persistencia local
-                await authInstance.setPersistence(firebase.auth.Auth.Persistence.LOCAL);
-
-                authInstance.onAuthStateChanged((user) => {
-                    if (user) {
-                        setUserId(user.uid);
-                        setAuthReady(true);
-                    } else {
-                        authInstance.signInAnonymously().catch(error => {
-                            console.error("Error al iniciar sesión anónimamente:", error);
-                            setAuthReady(false);
-                        });
-                    }
-                });
-
-                setDb(dbInstance);
-                setAuth(authInstance);
-                console.log("Firebase inicializado y configurado CON TU PROYECTO REAL.");
+                // Listener para cambios en el estado de autenticación
+                firebase.auth().onAuthStateChanged(onUserStatusChange);
 
             } catch (error) {
                 console.error("Error al configurar Firebase:", error);
+                setIsLoading(false);
             }
         };
 
-        // Rutas de Firestore
+        // **IMPORTANTE**: La ruta ahora es pública y compartida para todos los usuarios.
         const getClientCollectionPath = () => `clients`;
         
         const getDueDate = (loan) => {
@@ -282,10 +264,18 @@
             return monthlyTotals.map(total => parseFloat(total.toFixed(2)));
         };
 
-        const Header = ({ title }) => (
-            <header className="py-4 px-6 bg-blue-900 text-white shadow-lg sticky top-0 z-10">
-                <h1 className="text-2xl font-bold tracking-tight">{title}</h1>
-                <p className="text-sm opacity-90 mt-1">Gestión de Préstamos</p>
+        const Header = ({ title, onLogout }) => (
+            <header className="py-4 px-6 bg-blue-900 text-white shadow-lg sticky top-0 z-10 flex justify-between items-center">
+                <div>
+                    <h1 className="text-2xl font-bold tracking-tight">{title}</h1>
+                    <p className="text-sm opacity-90 mt-1">Gestión de Préstamos</p>
+                </div>
+                <button 
+                    onClick={onLogout}
+                    className="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg transition duration-200"
+                >
+                    Cerrar Sesión
+                </button>
             </header>
         );
 
@@ -298,35 +288,78 @@
             </button>
         );
 
-        const App = () => {
-            const [db, setDb] = useState(null);
-            const [auth, setAuth] = useState(null);
-            const [userId, setUserId] = useState(null);
-            const [isAuthReady, setAuthReady] = useState(false);
+        const LoginView = ({ onLogin, error }) => {
+            const [email, setEmail] = useState('');
+            const [password, setPassword] = useState('');
+
+            const handleSubmit = (e) => {
+                e.preventDefault();
+                onLogin(email, password);
+            };
+
+            return (
+                <div className="min-h-screen flex items-center justify-center bg-gray-200">
+                    <div className="bg-white p-8 rounded-xl shadow-2xl w-full max-w-md">
+                        <h1 className="text-3xl font-bold text-center text-blue-900 mb-2">PRESTA FÁCIL</h1>
+                        <p className="text-center text-gray-600 mb-6">Inicio de Sesión</p>
+                        {error && <p className="bg-red-100 text-red-700 p-3 rounded-lg text-center mb-4">{error}</p>}
+                        <form onSubmit={handleSubmit} className="space-y-6">
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700">Correo Electrónico</label>
+                                <input
+                                    type="email"
+                                    value={email}
+                                    onChange={(e) => setEmail(e.target.value)}
+                                    required
+                                    className="mt-1 w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-700"
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700">Contraseña</label>
+                                <input
+                                    type="password"
+                                    value={password}
+                                    onChange={(e) => setPassword(e.target.value)}
+                                    required
+                                    className="mt-1 w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-700"
+                                />
+                            </div>
+                            <button
+                                type="submit"
+                                className="w-full bg-blue-800 text-white p-3 rounded-xl font-bold hover:bg-blue-900 transition duration-200 shadow-lg"
+                            >
+                                Ingresar
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            );
+        };
+        
+        const MainApp = ({ user, userRole, onLogout }) => {
             const [clients, setClients] = useState([]);
             const [currentView, setCurrentView] = useState('dashboard');
-            const [selectedClient, setSelectedClient] = useState(null);
+            const [selectedClientId, setSelectedClientId] = useState(null);
             const [isModalOpen, setIsModalOpen] = useState(false);
             const [modalContent, setModalContent] = useState({ title: '', body: null });
+            const db = firebase.firestore();
+
+            const selectedClient = useMemo(() => clients.find(c => c.id === selectedClientId), [clients, selectedClientId]);
 
             useEffect(() => {
-                setupFirebase(setAuthReady, setUserId, setDb, setAuth);
-            }, []);
-
-            useEffect(() => {
-                if (!db || !isAuthReady) return;
+                if (!db || !user) return;
                 const unsubscribe = db.collection(getClientCollectionPath()).onSnapshot((snapshot) => {
                     const clientData = snapshot.docs.map(doc => ({
                         id: doc.id,
                         ...doc.data()
                     }));
                     setClients(clientData);
-                    console.log("Datos de clientes actualizados.");
+                    console.log("Datos de clientes (compartidos) actualizados.");
                 }, (error) => {
                     console.error("Error al escuchar clientes:", error);
                 });
                 return () => unsubscribe();
-            }, [db, isAuthReady]);
+            }, [db, user]);
 
             const generalSummary = useMemo(() => {
                 let totalPrincipal = 0;
@@ -374,10 +407,15 @@
             };
 
             const handleSaveClient = async (clientData, loanData) => {
-                if (!db || !userId) return console.error("Base de datos no inicializada o usuario no autenticado.");
+                if (userRole !== 'admin') {
+                    console.error("Permiso denegado: Se requiere rol de administrador.");
+                    return;
+                }
                 const clientsColRef = db.collection(getClientCollectionPath());
                 try {
-                    const existingClientSnapshot = await clientsColRef.where("name", "==", clientData.name).get();
+                    const clientNameLower = clientData.name.toLowerCase();
+                    const existingClientSnapshot = await clientsColRef.where("name_lower", "==", clientNameLower).get();
+
                     const defaultTermDays = loanData.loanType === 'monthly' ? loanData.termMonths * 30 : null;
                     const newLoan = {
                         ...loanData,
@@ -387,6 +425,7 @@
                         status: 'Active',
                         paymentHistory: []
                     };
+
                     if (!existingClientSnapshot.empty) {
                         const clientDocRef = existingClientSnapshot.docs[0].ref;
                         await clientDocRef.update({
@@ -396,8 +435,9 @@
                     } else {
                         const newClientDoc = {
                             name: clientData.name,
+                            name_lower: clientNameLower,
                             phone: clientData.phone,
-                            registeredBy: userId,
+                            registeredBy: user.uid,
                             loans: [newLoan]
                         };
                         await clientsColRef.add(newClientDoc);
@@ -411,7 +451,10 @@
             };
             
             const handleSavePayment = async (clientId, loanId, paymentAmount, paymentType, paymentDate) => {
-                if (!db) return console.error("Base de datos no inicializada.");
+                if (userRole !== 'admin') {
+                    console.error("Permiso denegado: Se requiere rol de administrador.");
+                    return;
+                }
                 try {
                     const clientDocRef = db.collection(getClientCollectionPath()).doc(clientId);
                     const client = clients.find(c => c.id === clientId);
@@ -448,7 +491,10 @@
             };
 
             const handleDeletePayment = async (clientId, loanId, paymentId) => {
-                if (!db) return console.error("Base de datos no inicializada.");
+                if (userRole !== 'admin') {
+                    console.error("Permiso denegado: Se requiere rol de administrador.");
+                    return;
+                }
                 try {
                     const clientDocRef = db.collection(getClientCollectionPath()).doc(clientId);
                     const client = clients.find(c => c.id === clientId);
@@ -473,7 +519,10 @@
             };
 
             const handleDeleteLoan = async (clientId, loanId) => {
-                if (!db) return console.error("Base de datos no inicializada.");
+                if (userRole !== 'admin') {
+                    console.error("Permiso denegado: Se requiere rol de administrador.");
+                    return;
+                }
                 try {
                     const clientDocRef = db.collection(getClientCollectionPath()).doc(clientId);
                     const client = clients.find(c => c.id === clientId);
@@ -487,9 +536,29 @@
                 }
             };
 
-            // React Components are defined inside the main App component
-            // to keep everything self-contained in this single script tag.
-            // This is not standard practice for larger apps but works for this single-file setup.
+            const handleDeleteClient = async (clientId) => {
+                if (userRole !== 'admin') {
+                    console.error("Permiso denegado: Se requiere rol de administrador.");
+                    return;
+                }
+
+                const clientToDelete = clients.find(c => c.id === clientId);
+                if (!clientToDelete || (clientToDelete.loans && clientToDelete.loans.length > 0)) {
+                    console.error("No se puede eliminar este cliente o el cliente no fue encontrado.");
+                    closeModal();
+                    return;
+                }
+
+                try {
+                    await db.collection(getClientCollectionPath()).doc(clientId).delete();
+                    console.log("Cliente eliminado exitosamente.");
+                    closeModal();
+                    setSelectedClientId(null);
+                    setCurrentView('clientList');
+                } catch (error) {
+                    console.error("Error al eliminar el cliente:", error);
+                }
+            };
 
             const ClientForm = ({ onSave, initialClient = null }) => {
                 const [clientName, setClientName] = useState(initialClient ? initialClient.name : '');
@@ -645,7 +714,7 @@
                 );
             };
 
-            const LoanDetails = ({ loan, client, onDeletePayment, onDeleteLoan }) => {
+            const LoanDetails = ({ loan, client, userRole, onDeletePayment, onDeleteLoan }) => {
                 const clientId = client.id;
                 const { principalRemaining, interestRemaining, totalRemaining, totalInterestAccrued, fixedDailyInstallment, paymentsMade, totalInstallments, isOverdue, dueDate } = calculateLoanBalance(loan);
                 const interestPaid = loan.paymentHistory.filter(p => p.isInterest === true).reduce((sum, p) => sum + p.amount, 0);
@@ -713,10 +782,12 @@
                     <div className="p-4 border-b border-gray-200 bg-white rounded-xl shadow-md mb-4">
                         <div className="flex justify-between items-center mb-2">
                             <h4 className="text-lg font-bold text-blue-700">Préstamo {CURRENCY_SYMBOL} {loan.principal.toFixed(2)}<span className={`ml-3 text-xs font-semibold px-2 py-0.5 rounded-full ${statusClass}`}>{statusLabel}</span></h4>
-                            <div className="flex items-center space-x-2">
-                                 {loan.status === 'Active' && (<button onClick={handleAddPayment} className="text-sm bg-blue-700 text-white px-3 py-1 rounded-full hover:bg-blue-800 transition">+ Pago</button>)}
-                                <button onClick={confirmDeleteLoan} className="p-1.5 rounded-full text-red-500 hover:bg-red-100 transition" title="Eliminar préstamo"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>
-                            </div>
+                            {userRole === 'admin' && (
+                                <div className="flex items-center space-x-2">
+                                     {loan.status === 'Active' && (<button onClick={handleAddPayment} className="text-sm bg-blue-700 text-white px-3 py-1 rounded-full hover:bg-blue-800 transition">+ Pago</button>)}
+                                    <button onClick={confirmDeleteLoan} className="p-1.5 rounded-full text-red-500 hover:bg-red-100 transition" title="Eliminar préstamo"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>
+                                </div>
+                            )}
                         </div>
                         <div className="grid grid-cols-2 gap-2 text-sm text-gray-600">
                             <p>Tipo: <span className="font-semibold text-gray-800 ml-1">{loanTypeLabel}</span></p>
@@ -752,7 +823,9 @@
                                 {loan.paymentHistory.sort((a, b) => new Date(b.date) - new Date(a.date)).map((payment, index) => (
                                     <p key={payment.paymentId || index} className="text-xs border-b last:border-b-0 py-1 flex justify-between items-center group">
                                         <span><span className="text-gray-800">{payment.date}</span><span className={payment.isInterest ? 'text-blue-600 ml-2' : 'text-green-600 ml-2'}>{CURRENCY_SYMBOL}{payment.amount.toFixed(2)} ({payment.isInterest ? 'Int.' : 'Cap.'})</span></span>
-                                        <button onClick={() => confirmDeletePayment(payment)} className="p-1 rounded-full text-red-500 hover:bg-red-100 opacity-0 group-hover:opacity-100 transition-opacity" title="Eliminar pago"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>
+                                        {userRole === 'admin' && (
+                                            <button onClick={() => confirmDeletePayment(payment)} className="p-1 rounded-full text-red-500 hover:bg-red-100 opacity-0 group-hover:opacity-100 transition-opacity" title="Eliminar pago"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>
+                                        )}
                                     </p>
                                 ))}
                             </div>
@@ -761,18 +834,44 @@
                 );
             };
 
-            const ClientDetailView = ({ client, handleDeletePayment, handleDeleteLoan }) => {
-                const activeLoans = client.loans.filter(loan => calculateLoanBalance(loan).totalRemaining > 0.01).length;
+            const ClientDetailView = ({ client, userRole, handleDeletePayment, handleDeleteLoan, handleDeleteClient }) => {
                 const handleAddLoan = () => openModal(`Añadir Nuevo Préstamo a ${client.name}`, <ClientForm onSave={handleSaveClient} initialClient={client} />);
+                
+                const confirmDeleteClient = () => {
+                    if (client.loans && client.loans.length > 0) return; 
+                    openModal('Confirmar Eliminación de Cliente', (
+                        <div className="text-center p-4">
+                            <p className="text-lg mb-2">¿Estás seguro de que deseas eliminar permanentemente a <span className="font-bold">{client.name}</span>?</p>
+                            <p className="text-sm text-red-700 bg-red-50 p-2 rounded-lg mb-6">Esta acción es irreversible.</p>
+                            <div className="flex justify-center space-x-4 mt-6">
+                                <button onClick={closeModal} className="px-6 py-2 rounded-xl bg-gray-300 text-gray-800 font-bold hover:bg-gray-400 transition shadow-sm">Cancelar</button>
+                                <button onClick={() => handleDeleteClient(client.id)} className="px-6 py-2 rounded-xl bg-red-600 text-white font-bold hover:bg-red-700 transition shadow-md">Sí, Eliminar Cliente</button>
+                            </div>
+                        </div>
+                    ));
+                };
+
                 return (
                     <div className="p-4 md:p-6 bg-white rounded-xl shadow-2xl space-y-4">
                         <div className="flex justify-between items-center border-b pb-3 mb-4">
                             <h2 className="text-3xl font-extrabold text-gray-900">{client.name}</h2>
-                            <button onClick={handleAddLoan} className="bg-blue-700 text-white px-4 py-2 rounded-xl font-semibold hover:bg-blue-800 transition shadow-md">+ Nuevo Préstamo</button>
+                            {userRole === 'admin' && (
+                                <div className="flex items-center space-x-2">
+                                    <button onClick={handleAddLoan} className="bg-blue-700 text-white px-4 py-2 rounded-xl font-semibold hover:bg-blue-800 transition shadow-md">+ Nuevo Préstamo</button>
+                                    <button 
+                                        onClick={confirmDeleteClient}
+                                        disabled={client.loans && client.loans.length > 0}
+                                        title={client.loans && client.loans.length > 0 ? "No se puede eliminar un cliente con préstamos." : "Eliminar cliente"}
+                                        className="p-2 rounded-xl font-semibold transition shadow-md bg-red-600 text-white hover:bg-red-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
+                                    >
+                                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                                    </button>
+                                </div>
+                            )}
                         </div>
                         <p className="text-gray-600">Teléfono: <span className="font-medium">{client.phone || 'N/A'}</span></p>
-                        <h3 className="text-xl font-bold text-blue-800 mt-6">Préstamos Activos ({activeLoans})</h3>
-                        {client.loans.length > 0 ? (client.loans.map(loan => <LoanDetails key={loan.loanId} loan={loan} client={client} onDeletePayment={handleDeletePayment} onDeleteLoan={handleDeleteLoan} />)) : (<p className="text-gray-500 italic">Este cliente no tiene préstamos registrados.</p>)}
+                        <h3 className="text-xl font-bold text-blue-800 mt-6">Historial de Préstamos ({client.loans.length})</h3>
+                        {client.loans.length > 0 ? (client.loans.map(loan => <LoanDetails key={loan.loanId} loan={loan} client={client} userRole={userRole} onDeletePayment={handleDeletePayment} onDeleteLoan={handleDeleteLoan} />)) : (<p className="text-gray-500 italic">Este cliente no tiene préstamos registrados.</p>)}
                     </div>
                 );
             };
@@ -790,7 +889,7 @@
                     }
                 });
                 return (
-                    <div onClick={() => { setSelectedClient(client); setCurrentView('clientDetail'); }} className={`p-4 bg-white rounded-xl shadow-lg hover:shadow-xl transition duration-300 cursor-pointer border-l-4 ${isAnyOverdue ? 'border-red-600 animate-pulse-slow' : 'border-blue-700'}`}>
+                    <div onClick={() => { setSelectedClientId(client.id); setCurrentView('clientDetail'); }} className={`p-4 bg-white rounded-xl shadow-lg hover:shadow-xl transition duration-300 cursor-pointer border-l-4 ${isAnyOverdue ? 'border-red-600 animate-pulse-slow' : 'border-blue-700'}`}>
                         <div className="flex justify-between items-start">
                             <div className="flex flex-col"><h3 className="text-lg font-bold text-gray-800">{client.name}</h3><p className="text-sm text-gray-500">Préstamos Activos: <span className={`font-semibold ${isAnyOverdue ? 'text-red-600' : 'text-blue-600'}`}>{totalActiveLoans}</span></p></div>
                             <div className="text-right"><p className="text-xl font-extrabold text-red-600">{CURRENCY_SYMBOL}{totalOutstanding.toFixed(2)}</p><p className="text-xs text-gray-500">Saldo Total Pendiente</p></div>
@@ -799,9 +898,14 @@
                 );
             };
 
-            const ClientListView = () => (
+            const ClientListView = ({ userRole }) => (
                 <div className="p-4 md:p-6 space-y-4">
-                    <div className="flex justify-between items-center mb-4"><h2 className="text-2xl font-bold text-gray-800">Listado de Clientes ({clients.length})</h2><button onClick={() => openModal('Registrar Nuevo Cliente y Préstamo', <ClientForm onSave={handleSaveClient} />)} className="bg-green-600 text-white px-4 py-2 rounded-xl font-semibold hover:bg-green-700 transition shadow-md">+ Añadir Cliente</button></div>
+                    <div className="flex justify-between items-center mb-4">
+                        <h2 className="text-2xl font-bold text-gray-800">Listado de Clientes ({clients.length})</h2>
+                        {userRole === 'admin' && (
+                            <button onClick={() => openModal('Registrar Nuevo Cliente y Préstamo', <ClientForm onSave={handleSaveClient} />)} className="bg-green-600 text-white px-4 py-2 rounded-xl font-semibold hover:bg-green-700 transition shadow-md">+ Añadir Cliente</button>
+                        )}
+                    </div>
                     {clients.length > 0 ? (<div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">{clients.map(client => <ClientListItem key={client.id} client={client} />)}</div>) : (<div className="text-center p-8 bg-white rounded-xl border border-gray-200"><p className="text-gray-600">Aún no hay clientes registrados. ¡Comencemos tu negocio!</p></div>)}
                 </div>
             );
@@ -826,7 +930,7 @@
                             const activeLoans = client.loans.filter(l => calculateLoanBalance(l).totalRemaining > 0.01);
                             let totalPending = 0; let isAnyOverdue = false;
                             activeLoans.forEach(loan => { const balance = calculateLoanBalance(loan); totalPending += balance.totalRemaining; if (balance.isOverdue) isAnyOverdue = true; });
-                            return (<div key={client.id} className="p-3 bg-white rounded-lg shadow-md flex justify-between items-center cursor-pointer hover:bg-gray-50" onClick={() => { setSelectedClient(client); setCurrentView('clientDetail'); }}><span className="font-semibold text-gray-700">{client.name} {isAnyOverdue && <span className="ml-2 text-xs font-bold text-red-600 animate-pulse">(VENCIDO)</span>}</span><span className="font-bold text-xl text-red-600">{CURRENCY_SYMBOL}{totalPending.toFixed(2)}</span></div>);
+                            return (<div key={client.id} className="p-3 bg-white rounded-lg shadow-md flex justify-between items-center cursor-pointer hover:bg-gray-50" onClick={() => { setSelectedClientId(client.id); setCurrentView('clientDetail'); }}><span className="font-semibold text-gray-700">{client.name} {isAnyOverdue && <span className="ml-2 text-xs font-bold text-red-600 animate-pulse">(VENCIDO)</span>}</span><span className="font-bold text-xl text-red-600">{CURRENCY_SYMBOL}{totalPending.toFixed(2)}</span></div>);
                         })}
                     </div>
                 </div>
@@ -905,12 +1009,9 @@
             };
 
             const renderView = () => {
-                if (!isAuthReady) {
-                    return <div className="flex justify-center items-center h-full p-8 text-blue-700"><p className="text-lg">Cargando la base de datos y la autenticación...</p></div>;
-                }
                 switch (currentView) {
-                    case 'clientList': return <ClientListView />;
-                    case 'clientDetail': return selectedClient ? <ClientDetailView client={selectedClient} handleDeletePayment={handleDeletePayment} handleDeleteLoan={handleDeleteLoan} /> : <ClientListView />;
+                    case 'clientList': return <ClientListView userRole={userRole} />;
+                    case 'clientDetail': return selectedClient ? <ClientDetailView client={selectedClient} userRole={userRole} handleDeletePayment={handleDeletePayment} handleDeleteLoan={handleDeleteLoan} handleDeleteClient={handleDeleteClient} /> : <ClientListView userRole={userRole} />;
                     case 'reports': return <ReportsView clients={clients} />;
                     case 'dashboard':
                     default: return <DashboardView />;
@@ -919,7 +1020,7 @@
 
             return (
                 <div className="bg-gray-100 min-h-screen font-sans">
-                    <Header title="PRESTA FÁCIL" />
+                    <Header title="PRESTA FÁCIL" onLogout={onLogout} />
                     <Modal title={modalContent.title} isOpen={isModalOpen} onClose={closeModal}>
                         {modalContent.body}
                     </Modal>
@@ -936,9 +1037,72 @@
                 </div>
             );
         };
+        
+        const App = () => {
+            const [user, setUser] = useState(null);
+            const [userRole, setUserRole] = useState(null);
+            const [isLoading, setIsLoading] = useState(true);
+            const [authError, setAuthError] = useState('');
+
+            useEffect(() => {
+                setupFirebase(async (currentUser) => {
+                    if (currentUser) {
+                        // User is logged in, fetch their role
+                        const db = firebase.firestore();
+                        const userRoleRef = db.collection('user_roles').doc(currentUser.uid);
+                        try {
+                            const doc = await userRoleRef.get();
+                            if (doc.exists) {
+                                setUserRole(doc.data().role); // e.g., 'admin' or 'viewer'
+                            } else {
+                                console.warn("Usuario no tiene rol asignado. Asignando solo lectura por defecto.");
+                                setUserRole('viewer'); // Secure default
+                            }
+                        } catch (error) {
+                            console.error("Error al obtener el rol del usuario:", error);
+                            setUserRole('viewer'); // Secure default on error
+                        }
+                        setUser(currentUser);
+                    } else {
+                        // User is logged out, clear all state
+                        setUser(null);
+                        setUserRole(null);
+                    }
+                    setIsLoading(false);
+                }, setIsLoading);
+            }, []);
+
+            const handleLogin = (email, password) => {
+                setAuthError(''); // Limpiar errores previos
+                firebase.auth().signInWithEmailAndPassword(email, password)
+                    .catch(error => {
+                        console.error("Error de autenticación:", error.code, error.message);
+                        if(error.code === 'auth/wrong-password' || error.code === 'auth/user-not-found' || error.code === 'auth/invalid-credential') {
+                            setAuthError('El correo o la contraseña son incorrectos.');
+                        } else {
+                            setAuthError('Ocurrió un error al intentar iniciar sesión.');
+                        }
+                    });
+            };
+            
+            const handleLogout = () => {
+                firebase.auth().signOut();
+            };
+
+            if (isLoading) {
+                return (
+                    <div className="min-h-screen flex items-center justify-center">
+                        <p className="text-lg text-blue-800">Cargando aplicación...</p>
+                    </div>
+                );
+            }
+
+            return user && userRole ? <MainApp user={user} userRole={userRole} onLogout={handleLogout} /> : <LoginView onLogin={handleLogin} error={authError} />;
+        };
 
         // Final render call for the application
         ReactDOM.render(<App />, document.getElementById('root'));
     </script>
 </body>
 </html>
+
