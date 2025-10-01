@@ -2,7 +2,7 @@
 <html lang="es">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale-1.0">
     <title>Gestor de Préstamos Diarios - PRESTA FÁCIL</title>
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -223,13 +223,14 @@
         const calculateMonthlyPerformance = (clients) => {
             const today = new Date();
             const currentYear = today.getFullYear();
-            const currentMonth = today.getMonth(); 
+            const currentMonth = today.getMonth();
             let monthlyInterestGain = 0;
             let monthlyPrincipalGain = 0;
             clients.forEach(client => {
                 client.loans.forEach(loan => {
                     loan.paymentHistory.forEach(payment => {
-                        const paymentDate = new Date(payment.date);
+                        // FIX: Replace hyphens with slashes to ensure date is parsed in local timezone
+                        const paymentDate = new Date(payment.date.replace(/-/g, '/'));
                         if (paymentDate.getFullYear() === currentYear && paymentDate.getMonth() === currentMonth) {
                             if (payment.isInterest) {
                                 monthlyInterestGain += payment.amount;
@@ -252,7 +253,7 @@
                 client.loans.forEach(loan => {
                     loan.paymentHistory.forEach(payment => {
                         if (payment.isInterest) {
-                            const paymentDate = new Date(payment.date);
+                            const paymentDate = new Date(payment.date.replace(/-/g, '/'));
                             if (!isNaN(paymentDate.getTime()) && paymentDate.getFullYear() === year) {
                                 const month = paymentDate.getMonth();
                                 monthlyTotals[month] += payment.amount;
@@ -620,7 +621,7 @@
                         termDays: finalTermDays, 
                     };
 
-                    onSave(clientData, loanData);
+                    onSave(clientData, loanData, initialClient ? initialClient.id : null);
                 };
 
                 const ratePlaceholder = useMemo(() => {
@@ -989,7 +990,7 @@
                 const availableYears = useMemo(() => {
                     const years = new Set([new Date().getFullYear()]);
                     clients.forEach(client => client.loans.forEach(loan => loan.paymentHistory.forEach(payment => {
-                        const paymentDate = new Date(payment.date);
+                        const paymentDate = new Date(payment.date.replace(/-/g, '/'));
                         if (!isNaN(paymentDate.getTime())) years.add(paymentDate.getFullYear());
                     })));
                     return Array.from(years).sort((a, b) => b - a);
