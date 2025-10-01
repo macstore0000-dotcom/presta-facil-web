@@ -406,32 +406,50 @@
                 setModalContent({ title: '', body: null });
             };
 
-            const handleSaveClient = async (clientData, loanData) => {
+            const handleSaveClient = async (clientData, loanData, existingClientId = null) => {
                 if (userRole !== 'admin') {
                     console.error("Permiso denegado: Se requiere rol de administrador.");
                     return;
                 }
+
+                const defaultTermDays = loanData.loanType === 'monthly' ? loanData.termMonths * 30 : null;
+                const newLoan = {
+                    ...loanData,
+                    termDays: loanData.termDays || defaultTermDays,
+                    loanId: crypto.randomUUID(),
+                    totalAmountPaid: 0,
+                    status: 'Active',
+                    paymentHistory: []
+                };
+
+                // If a client ID is provided, we are updating that specific client.
+                if (existingClientId) {
+                    try {
+                        const clientDocRef = db.collection(getClientCollectionPath()).doc(existingClientId);
+                        await clientDocRef.update({
+                            loans: firebase.firestore.FieldValue.arrayUnion(newLoan)
+                        });
+                        console.log("Préstamo añadido al cliente existente por ID:", existingClientId);
+                        closeModal();
+                        return;
+                    } catch (error) {
+                        console.error("Error al añadir préstamo a cliente existente:", error);
+                        return;
+                    }
+                }
+
+                // Logic to create a new client (with name verification)
                 const clientsColRef = db.collection(getClientCollectionPath());
                 try {
                     const clientNameLower = clientData.name.toLowerCase();
                     const existingClientSnapshot = await clientsColRef.where("name_lower", "==", clientNameLower).get();
-
-                    const defaultTermDays = loanData.loanType === 'monthly' ? loanData.termMonths * 30 : null;
-                    const newLoan = {
-                        ...loanData,
-                        termDays: loanData.termDays || defaultTermDays,
-                        loanId: crypto.randomUUID(),
-                        totalAmountPaid: 0,
-                        status: 'Active',
-                        paymentHistory: []
-                    };
-
+                    
                     if (!existingClientSnapshot.empty) {
                         const clientDocRef = existingClientSnapshot.docs[0].ref;
                         await clientDocRef.update({
                             loans: firebase.firestore.FieldValue.arrayUnion(newLoan)
                         });
-                        console.log("Préstamo añadido al cliente existente:", clientData.name);
+                        console.log("Préstamo añadido al cliente existente encontrado por nombre:", clientData.name);
                     } else {
                         const newClientDoc = {
                             name: clientData.name,
@@ -835,7 +853,7 @@
             };
 
             const ClientDetailView = ({ client, userRole, handleDeletePayment, handleDeleteLoan, handleDeleteClient }) => {
-                const handleAddLoan = () => openModal(`Añadir Nuevo Préstamo a ${client.name}`, <ClientForm onSave={handleSaveClient} initialClient={client} />);
+                const handleAddLoan = () => openModal(`Añadir Nuevo Préstamo a ${client.name}`, <ClientForm onSave={(clientData, loanData) => handleSaveClient(clientData, loanData, client.id)} initialClient={client} />);
                 
                 const confirmDeleteClient = () => {
                     if (client.loans && client.loans.length > 0) return; 
